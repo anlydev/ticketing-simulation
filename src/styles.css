@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --melon: #00c73c;
+  --melon-dark: #00a832;
+  --line: #dddddd;
+  --muted: #777777;
+  --ink: #111827;
+  --panel: #f8f8f8;
+  --danger: #ff6b2c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.melon-logo {
+  color: var(--melon);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+}
+
+.ticket-window {
+  border: 1px solid #d8d8d8;
+  background:
+    linear-gradient(90deg, rgba(0, 199, 60, 0.04) 0 1px, transparent 1px 100%),
+    linear-gradient(#ffffff, #ffffff);
+  background-size: 18px 18px, auto;
+}
+
+.captcha-text {
+  letter-spacing: 0.12em;
+  text-decoration: line-through;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.12), -2px -1px 0 rgba(0, 199, 60, 0.2);
+}
+
+.seat-grid {
+  grid-template-columns: repeat(18, minmax(18px, 28px));
+}
+
+@media (max-width: 760px) {
+  .seat-grid {
+    grid-template-columns: repeat(12, minmax(18px, 1fr));
+  }
+}
