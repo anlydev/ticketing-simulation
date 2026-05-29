@@ -1,28 +1,41 @@
+import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { BarChart3, CircleX, Home, RotateCcw, Trophy } from 'lucide-react';
 import AppShell from '../components/AppShell.jsx';
 import { useSimulation } from '../context/SimulationContext.jsx';
 import { buildResult } from '../utils/scoring.js';
+import { socket } from '../socket.js';
 
 export default function ResultPage() {
   const location = useLocation();
-  const { result, stats, resetSimulation } = useSimulation();
+  const { result, stats, resetSimulation, mode, setMode, selectedSeat } = useSimulation();
   const fallback = buildResult({
     stats,
     success: location.state?.success ?? false,
-    failureReason: location.state?.failureReason ?? '훈련이 중단되었습니다.'
+    failureReason: location.state?.failureReason ?? '연습이 중단되었습니다.'
   });
   const report = result ?? fallback;
+
+  useEffect(() => {
+    socket.on('multi-ranking', ({ rankings }) => {
+      setMode((prev) => ({ ...prev, rankings }));
+    });
+    return () => socket.off('multi-ranking');
+  }, [setMode]);
 
   const metrics = [
     ['오픈 클릭 반응', report.openReactionMs != null ? `${report.openReactionMs}ms` : '기록 없음'],
     ['오픈 반응 점수', `${report.openReactionScore}점`],
+    ['종합 점수', `${report.totalScore ?? 0}점`],
     ['평균 클릭 간격', report.averageClickSpeed ? `${report.averageClickSpeed}ms` : '기록 부족'],
     ['좌석 선택 시간', report.seatSelectionTime ? `${report.seatSelectionTime}초` : '미선택'],
     ['CAPTCHA 성공률', `${report.captchaRate}%`],
     ['서버 오류 대처 점수', `${report.serverReactionScore}점`],
     ['좌석 실패 횟수', `${report.seatFailures}회`],
-    ['총 오류 노출', `${report.totalErrors}회`]
+    ['총 오류 노출', `${report.totalErrors}회`],
+    ['AI 경쟁 모드', report.botMode ?? 'live'],
+    ['봇 결제 완료 좌석', `${report.botSeatsSold ?? 0}개`],
+    ['봇 압박 이벤트', `${report.botPressureEvents ?? 0}회`]
   ];
 
   return (
@@ -33,8 +46,14 @@ export default function ResultPage() {
         </div>
         <h2 className="mt-6 text-4xl font-black">{report.success ? '예매 성공' : '예매 실패'}</h2>
         <p className="mt-3 text-[#666]">
-          {report.success ? '좌석 확보와 결제 시뮬레이션을 완료했습니다.' : report.failureReason}
+          {report.success ? '좌석 선택과 결제 시뮬레이션을 완료했습니다.' : report.failureReason}
         </p>
+
+        {mode.type === 'mission' && (
+          <p className="mt-3 font-bold text-[#e76b9a]">
+            미션: {mode.missionZone}구역 · 선택 좌석: {selectedSeat?.zone ? `${selectedSeat.zone}구역` : '없음'}
+          </p>
+        )}
 
         <div className="mt-8 grid gap-3 sm:grid-cols-2">
           {metrics.map(([label, value]) => (
@@ -48,6 +67,22 @@ export default function ResultPage() {
           ))}
         </div>
 
+        {mode.type === 'multi' && (
+          <section className="mt-8 border border-[#eeeeee] bg-[#fafafa] p-5 text-left">
+            <h3 className="text-xl font-black">멀티 순위</h3>
+            <div className="mt-4 space-y-2">
+              {(mode.rankings.length ? mode.rankings : mode.participants).map((player, index) => (
+                <div key={player.id ?? player.name} className="flex items-center justify-between border border-[#e5e5e5] bg-white px-4 py-3">
+                  <span className="font-bold">
+                    {index + 1}위 · {player.name}
+                  </span>
+                  <span className="text-[var(--melon)]">{player.score != null ? `${player.score}점` : '결과 대기'}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link
             to="/"
@@ -59,7 +94,7 @@ export default function ResultPage() {
           </Link>
           <Link to="/" onClick={resetSimulation} className="inline-flex items-center justify-center gap-2 border border-[#cccccc] px-6 py-4 font-black text-[#555]">
             <Home size={18} />
-            공연 목록
+            모드 선택
           </Link>
         </div>
       </section>

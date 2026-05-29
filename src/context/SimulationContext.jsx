@@ -13,7 +13,20 @@ const initialStats = {
   captchaAttempts: 0,
   captchaSuccess: 0,
   seatSelectedAt: null,
-  crisisHandled: 0
+  crisisHandled: 0,
+  botMode: 'live',
+  botSeatsSold: 0,
+  botSeatsReleased: 0,
+  botPressureEvents: 0
+};
+
+const initialMode = {
+  type: null,
+  missionZone: null,
+  roomKey: null,
+  participantName: null,
+  participants: [],
+  rankings: []
 };
 
 export function SimulationProvider({ children }) {
@@ -21,12 +34,14 @@ export function SimulationProvider({ children }) {
   const [selectedSeat, setSelectedSeat] = useState(null);
   const [stats, setStats] = useState(initialStats);
   const [result, setResult] = useState(null);
+  const [mode, setMode] = useState(initialMode);
 
   const resetSimulation = () => {
     setSelectedPerformance(null);
     setSelectedSeat(null);
     setResult(null);
     setStats({ ...initialStats, startedAt: Date.now(), clicks: [] });
+    setMode(initialMode);
   };
 
   const recordClick = () => {
@@ -62,9 +77,11 @@ export function SimulationProvider({ children }) {
       recordOpenClick,
       result,
       setResult,
+      mode,
+      setMode,
       resetSimulation
     }),
-    [selectedPerformance, selectedSeat, stats, result]
+    [selectedPerformance, selectedSeat, stats, result, mode]
   );
 
   return <SimulationContext.Provider value={value}>{children}</SimulationContext.Provider>;

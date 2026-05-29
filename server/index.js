@@ -31,29 +31,252 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const buildSeats = () => {
-  const sections = ['DIAMOND', 'STANDING', 'SEATED', 'BALCONY'];
-  return sections.flatMap((section) =>
-    Array.from({ length: 36 }, (_, index) => ({
-      id: `${section}-${index + 1}`,
-      section,
-      number: index + 1,
-      status: Math.random() < 0.12 ? 'taken' : 'available',
-      price: section === 'DIAMOND' ? 198000 : section === 'BALCONY' ? 132000 : 165000
-    }))
-  );
+  const seats = [];
+
+  for (let zone = 1; zone <= 56; zone += 1) {
+    const rows = 7 + Math.floor(Math.random() * 4);
+    const cols = 7 + Math.floor(Math.random() * 5);
+    let number = 1;
+
+    for (let row = 1; row <= rows; row += 1) {
+      for (let col = 1; col <= cols; col += 1) {
+        const gap = Math.random() < 0.08;
+        const section = zone <= 8 ? 'DIAMOND' : zone <= 24 ? 'STANDING' : 'SEATED';
+        seats.push({
+          id: `${zone}구역-${number}`,
+          zone,
+          section,
+          row,
+          col,
+          number,
+          gap,
+          status: gap ? 'gap' : Math.random() < 0.12 ? 'taken' : 'available',
+          price: section === 'DIAMOND' ? 198000 : 165000
+        });
+        number += 1;
+      }
+    }
+  }
+
+  return seats;
 };
 
 const rooms = new Map();
+const multiplayerRooms = new Map();
 
-const getRoom = (performanceId) => {
-  if (!rooms.has(performanceId)) {
-    rooms.set(performanceId, {
+const botModeConfig = {
+  relaxed: { label: 'Relaxed', baseBots: 18, ghostRatio: 0.55, spawnWindow: 9000, buySuccess: 0.42 },
+  live: { label: 'Live', baseBots: 42, ghostRatio: 0.45, spawnWindow: 6500, buySuccess: 0.58 },
+  bloodbath: { label: 'Bloodbath', baseBots: 78, ghostRatio: 0.36, spawnWindow: 4200, buySuccess: 0.72 },
+  mission: { label: 'Mission', baseBots: 64, ghostRatio: 0.38, spawnWindow: 4300, buySuccess: 0.68 }
+};
+
+const botSeatWeight = (seat, missionZone = null) => {
+  const sectionWeight = {
+    DIAMOND: 8,
+    STANDING: 5,
+    SEATED: 4,
+    BALCONY: 2
+  }[seat.section] ?? 1;
+  const numberBoost = Math.max(1, 40 - seat.number) / 40;
+  const missionBoost = missionZone && seat.zone === missionZone ? 24 : 0;
+  return sectionWeight + numberBoost * 4 + missionBoost + Math.random();
+};
+
+const pickBotSeat = (room) => {
+  const available = room.seats.filter((seat) => seat.status === 'available');
+  if (!available.length) return null;
+
+  const total = available.reduce((sum, seat) => sum + botSeatWeight(seat, room.missionZone), 0);
+  let cursor = Math.random() * total;
+  return available.find((seat) => {
+    cursor -= botSeatWeight(seat, room.missionZone);
+    return cursor <= 0;
+  }) ?? available[0];
+};
+
+const emitBotStatus = (roomId, room) => {
+  io.to(`performance:${roomId}`).emit('bot-status', {
+    mode: room.botMode,
+    total: room.botStats.ghostActive + room.botStats.buyerActive,
+    ghost: room.botStats.ghostActive,
+    buyer: room.botStats.buyerActive,
+    held: room.seats.filter((seat) => seat.status === 'held' && seat.heldBy === 'bot').length,
+    sold: room.botStats.sold,
+    released: room.botStats.released
+  });
+};
+
+const emitBotEvent = (roomId, room, payload) => {
+  room.botStats.lastEvent = payload;
+  io.to(`performance:${roomId}`).emit('bot-event', payload);
+  emitBotStatus(roomId, room);
+};
+
+const stopRoomBots = (room) => {
+  room.botTimers.forEach((timer) => clearTimeout(timer));
+  room.botTimers = [];
+  room.botRunning = false;
+  room.seats.forEach((seat) => {
+    if (seat.status === 'held' && seat.heldBy === 'bot') {
+      seat.status = 'available';
+      delete seat.holder;
+      delete seat.heldBy;
+    }
+  });
+  room.botStats.ghostActive = 0;
+  room.botStats.buyerActive = 0;
+};
+
+const scheduleBotTimer = (room, callback, delay) => {
+  const timer = setTimeout(() => {
+    room.botTimers = room.botTimers.filter((item) => item !== timer);
+    callback();
+  }, delay);
+  room.botTimers.push(timer);
+};
+
+const startRoomBots = (roomId, room, mode = 'live', missionZone = null, performanceId = roomId) => {
+  const nextMode = botModeConfig[mode] ? mode : 'live';
+  if (room.botRunning && room.botMode === nextMode) {
+    emitBotStatus(roomId, room);
+    return;
+  }
+
+  if (room.botRunning) stopRoomBots(room);
+
+  const config = botModeConfig[nextMode];
+  room.missionZone = missionZone ? Number(missionZone) : room.missionZone ?? null;
+  const performance = performances.find((item) => item.id === performanceId);
+  const popularity = Math.max(0.35, Math.min(1.25, (performance?.difficulty ?? 80) / 100));
+  const totalBots = Math.max(8, Math.round(config.baseBots * popularity));
+  const ghostBots = Math.round(totalBots * config.ghostRatio);
+  const buyerBots = totalBots - ghostBots;
+
+  room.botMode = nextMode;
+  room.botRunning = true;
+  room.botStats = {
+    ghostActive: ghostBots,
+    buyerActive: buyerBots,
+    sold: 0,
+    released: 0,
+    lastEvent: null
+  };
+
+  const runGhostBot = (index) => {
+    if (!room.botRunning) return;
+    const seat = pickBotSeat(room);
+    if (!seat) {
+      scheduleBotTimer(room, () => runGhostBot(index), 3500 + Math.random() * 5000);
+      return;
+    }
+
+    const botId = `ghost:${index}`;
+    seat.status = 'held';
+    seat.holder = botId;
+    seat.heldBy = 'bot';
+    io.to(`performance:${roomId}`).emit('seat-updated', seat);
+    emitBotEvent(roomId, room, {
+      type: 'ghost-hold',
+      message: `Ghost bot temporarily held ${seat.id}.`
+    });
+
+    scheduleBotTimer(room, () => {
+      if (seat.status === 'held' && seat.holder === botId) {
+        seat.status = 'available';
+        delete seat.holder;
+        delete seat.heldBy;
+        room.botStats.released += 1;
+        io.to(`performance:${roomId}`).emit('seat-updated', seat);
+        emitBotEvent(roomId, room, {
+          type: 'ghost-release',
+          message: `Ghost bot released ${seat.id}.`
+        });
+      }
+      scheduleBotTimer(room, () => runGhostBot(index), 7000 + Math.random() * 15000);
+    }, 9000 + Math.random() * 26000);
+  };
+
+  const runBuyerBot = (index) => {
+    if (!room.botRunning) return;
+    const seat = pickBotSeat(room);
+    if (!seat) {
+      room.botStats.buyerActive = Math.max(0, room.botStats.buyerActive - 1);
+      emitBotStatus(roomId, room);
+      return;
+    }
+
+    const botId = `buyer:${index}`;
+    seat.status = 'held';
+    seat.holder = botId;
+    seat.heldBy = 'bot';
+    io.to(`performance:${roomId}`).emit('seat-updated', seat);
+    emitBotEvent(roomId, room, {
+      type: 'buyer-hold',
+      message: `Buyer bot is checking out ${seat.id}.`
+    });
+
+    scheduleBotTimer(room, () => {
+      if (seat.status !== 'held' || seat.holder !== botId) return;
+
+      if (Math.random() < config.buySuccess) {
+        seat.status = 'sold';
+        delete seat.holder;
+        delete seat.heldBy;
+        room.botStats.sold += 1;
+        io.to(`performance:${roomId}`).emit('seat-updated', seat);
+        emitBotEvent(roomId, room, {
+          type: 'buyer-sold',
+          message: `Buyer bot completed payment for ${seat.id}.`
+        });
+      } else {
+        seat.status = 'available';
+        delete seat.holder;
+        delete seat.heldBy;
+        room.botStats.released += 1;
+        io.to(`performance:${roomId}`).emit('seat-updated', seat);
+        emitBotEvent(roomId, room, {
+          type: 'buyer-failed',
+          message: `Buyer bot payment failed and ${seat.id} returned.`
+        });
+      }
+
+      room.botStats.buyerActive = Math.max(0, room.botStats.buyerActive - 1);
+      emitBotStatus(roomId, room);
+    }, 3500 + Math.random() * 12500);
+  };
+
+  for (let index = 0; index < ghostBots; index += 1) {
+    scheduleBotTimer(room, () => runGhostBot(index), Math.random() * config.spawnWindow);
+  }
+
+  for (let index = 0; index < buyerBots; index += 1) {
+    scheduleBotTimer(room, () => runBuyerBot(index), Math.random() * config.spawnWindow);
+  }
+
+  emitBotStatus(roomId, room);
+};
+
+const getRoom = (roomId) => {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
       seats: buildSeats(),
-      queueBase: Math.floor(Math.random() * 900) + 1100
+      queueBase: Math.floor(Math.random() * 900) + 1100,
+      botMode: 'live',
+      missionZone: null,
+      botRunning: false,
+      botTimers: [],
+      botStats: {
+        ghostActive: 0,
+        buyerActive: 0,
+        sold: 0,
+        released: 0,
+        lastEvent: null
+      }
     });
   }
 
-  return rooms.get(performanceId);
+  return rooms.get(roomId);
 };
 
 const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
@@ -96,16 +319,58 @@ const applySeatPressure = (room, tier) => {
 };
 
 io.on('connection', (socket) => {
-  socket.on('join-performance', ({ performanceId, phase = 'queue', reactionMs = 900 }) => {
-    const roomName = `performance:${performanceId}`;
-    const room = getRoom(performanceId);
+  socket.on('create-multi-room', () => {
+    const roomKey = Math.random().toString(36).slice(2, 8).toUpperCase();
+    const participant = { id: socket.id, name: '참여자1', joinedAt: Date.now() };
+    multiplayerRooms.set(roomKey, {
+      roomKey,
+      roomId: `multi:${roomKey}`,
+      participants: [participant],
+      results: []
+    });
+    socket.join(`multi:${roomKey}`);
+    socket.data.multiRoomKey = roomKey;
+    socket.emit('multi-room-created', { roomKey, participants: [participant] });
+  });
+
+  socket.on('join-multi-room', ({ roomKey }) => {
+    const normalizedKey = String(roomKey ?? '').trim().toUpperCase();
+    const multiRoom = multiplayerRooms.get(normalizedKey);
+    if (!multiRoom) {
+      socket.emit('multi-room-error', { message: '존재하지 않는 방키입니다.' });
+      return;
+    }
+
+    const existing = multiRoom.participants.find((participant) => participant.id === socket.id);
+    const participant = existing ?? {
+      id: socket.id,
+      name: `참여자${multiRoom.participants.length + 1}`,
+      joinedAt: Date.now()
+    };
+    if (!existing) multiRoom.participants.push(participant);
+
+    socket.join(`multi:${normalizedKey}`);
+    socket.data.multiRoomKey = normalizedKey;
+    socket.emit('multi-room-joined', { roomKey: normalizedKey, participants: multiRoom.participants });
+    io.to(`multi:${normalizedKey}`).emit('multi-participants', { participants: multiRoom.participants });
+  });
+
+  socket.on('join-performance', ({ performanceId, phase = 'queue', reactionMs = 900, botMode = 'live', missionZone = null, roomKey = null }) => {
+    const multiRoom = roomKey ? multiplayerRooms.get(String(roomKey).toUpperCase()) : null;
+    const roomId = multiRoom?.roomId ?? performanceId;
+    const roomName = `performance:${roomId}`;
+    const room = getRoom(roomId);
     const tier = reactionTier(reactionMs);
 
     socket.join(roomName);
     socket.data.performanceId = performanceId;
+    socket.data.roomId = roomId;
     socket.data.phase = phase;
     socket.data.reactionMs = reactionMs;
     socket.data.reactionTier = tier;
+    socket.data.missionZone = missionZone ? Number(missionZone) : null;
+
+    startRoomBots(roomId, room, botMode, missionZone, performanceId);
 
     if (phase === 'queue') {
       applySeatPressure(room, tier);
@@ -125,6 +390,7 @@ io.on('connection', (socket) => {
     }
 
     socket.emit('seat-map', room.seats);
+    emitBotStatus(roomId, room);
   });
 
   socket.on('set-phase', ({ phase }) => {
@@ -132,7 +398,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('claim-seat', ({ seatId }) => {
-    const room = getRoom(socket.data.performanceId);
+    const room = getRoom(socket.data.roomId ?? socket.data.performanceId);
     const seat = room.seats.find((item) => item.id === seatId);
 
     const failChance = { perfect: 0.11, fast: 0.16, normal: 0.23, late: 0.32 }[socket.data.reactionTier] ?? 0.2;
@@ -147,14 +413,16 @@ io.on('connection', (socket) => {
 
     seat.status = 'held';
     seat.holder = socket.id;
-    io.to(`performance:${socket.data.performanceId}`).emit('seat-updated', seat);
+    seat.heldBy = 'player';
+    io.to(`performance:${socket.data.roomId ?? socket.data.performanceId}`).emit('seat-updated', seat);
 
     setTimeout(() => {
       const latestSeat = room.seats.find((item) => item.id === seatId);
       if (latestSeat?.status === 'held' && latestSeat.holder === socket.id) {
         latestSeat.status = 'available';
         delete latestSeat.holder;
-        io.to(`performance:${socket.data.performanceId}`).emit('seat-updated', latestSeat);
+        delete latestSeat.heldBy;
+        io.to(`performance:${socket.data.roomId ?? socket.data.performanceId}`).emit('seat-updated', latestSeat);
         socket.emit('seat-released', {
           seatId,
           reason: '제한 시간 내 결제가 완료되지 않아 좌석이 해제되었습니다.'
@@ -164,21 +432,42 @@ io.on('connection', (socket) => {
   });
 
   socket.on('release-seat', ({ seatId }) => {
-    const room = getRoom(socket.data.performanceId);
+    const room = getRoom(socket.data.roomId ?? socket.data.performanceId);
     const seat = room.seats.find((item) => item.id === seatId);
     if (seat?.holder === socket.id) {
       seat.status = 'available';
       delete seat.holder;
-      io.to(`performance:${socket.data.performanceId}`).emit('seat-updated', seat);
+      delete seat.heldBy;
+      io.to(`performance:${socket.data.roomId ?? socket.data.performanceId}`).emit('seat-updated', seat);
     }
   });
 
-  socket.on('complete-payment', ({ seatId }) => {
-    const room = getRoom(socket.data.performanceId);
+  socket.on('complete-payment', ({ seatId, result = null }) => {
+    const room = getRoom(socket.data.roomId ?? socket.data.performanceId);
     const seat = room.seats.find((item) => item.id === seatId);
     if (seat?.holder === socket.id) {
       seat.status = 'sold';
-      io.to(`performance:${socket.data.performanceId}`).emit('seat-updated', seat);
+      delete seat.holder;
+      delete seat.heldBy;
+      io.to(`performance:${socket.data.roomId ?? socket.data.performanceId}`).emit('seat-updated', seat);
+    }
+
+    if (socket.data.multiRoomKey) {
+      const multiRoom = multiplayerRooms.get(socket.data.multiRoomKey);
+      const participant = multiRoom?.participants.find((item) => item.id === socket.id);
+      if (multiRoom && participant) {
+        const nextResult = {
+          id: socket.id,
+          name: participant.name,
+          seatId,
+          score: result?.totalScore ?? result?.score ?? 0,
+          openReactionMs: result?.openReactionMs ?? null,
+          completedAt: Date.now()
+        };
+        multiRoom.results = [...multiRoom.results.filter((item) => item.id !== socket.id), nextResult]
+          .sort((a, b) => b.score - a.score || (a.openReactionMs ?? 999999) - (b.openReactionMs ?? 999999));
+        io.to(`multi:${socket.data.multiRoomKey}`).emit('multi-ranking', { rankings: multiRoom.results });
+      }
     }
   });
 });

@@ -9,17 +9,21 @@ import { socket } from '../socket.js';
 export default function QueuePage() {
   const { performanceId } = useParams();
   const navigate = useNavigate();
-  const { selectedPerformance, stats, patchStats } = useSimulation();
+  const { selectedPerformance, stats, patchStats, mode } = useSimulation();
   const [queue, setQueue] = useState({ queueNumber: 0, ahead: 0, message: '대기열 연결 중...' });
   const [event, setEvent] = useState(null);
   const [refreshed, setRefreshed] = useState(false);
+  const [botStatus, setBotStatus] = useState(null);
 
   useEffect(() => {
     if (!socket.connected) socket.connect();
     socket.emit('join-performance', {
       performanceId,
       phase: 'queue',
-      reactionMs: selectedPerformance?.reactionMs ?? stats.openReactionMs ?? 900
+      reactionMs: selectedPerformance?.reactionMs ?? stats.openReactionMs ?? 900,
+      botMode: selectedPerformance?.botMode ?? stats.botMode ?? 'live',
+      missionZone: selectedPerformance?.missionZone ?? mode.missionZone,
+      roomKey: selectedPerformance?.roomKey ?? mode.roomKey
     });
 
     socket.on('queue-assigned', setQueue);
@@ -29,11 +33,19 @@ export default function QueuePage() {
       if (payload.ahead <= 0) navigate(`/seats/${performanceId}`);
     });
     socket.on('random-event', setEvent);
+    socket.on('bot-status', (payload) => {
+      setBotStatus(payload);
+      patchStats({
+        botSeatsSold: payload.sold ?? 0,
+        botSeatsReleased: payload.released ?? 0
+      });
+    });
 
     return () => {
       socket.off('queue-assigned');
       socket.off('queue-update');
       socket.off('random-event');
+      socket.off('bot-status');
     };
   }, [performanceId, navigate]);
 
@@ -53,6 +65,12 @@ export default function QueuePage() {
   };
 
   const progress = queue.queueNumber ? Math.min(100, ((queue.queueNumber - queue.ahead) / queue.queueNumber) * 100) : 0;
+
+  useEffect(() => {
+    if (queue.ahead <= 0 && queue.queueNumber > 0) {
+      navigate(`/seats/${performanceId}`);
+    }
+  }, [queue.ahead, queue.queueNumber, navigate, performanceId]);
 
   return (
     <AppShell compact>
@@ -84,6 +102,22 @@ export default function QueuePage() {
             {queue.ahead.toLocaleString()}
           </strong>
           <p className="mt-4 text-sm text-[#777]">{queue.message}</p>
+          {botStatus && (
+            <div className="mx-auto mt-6 grid max-w-[620px] gap-2 text-left sm:grid-cols-3">
+              <div className="border border-[#eeeeee] bg-[#fafafa] p-3">
+                <p className="text-xs text-[#777]">Bot mode</p>
+                <strong className="mt-1 block text-lg capitalize">{botStatus.mode}</strong>
+              </div>
+              <div className="border border-[#eeeeee] bg-[#fafafa] p-3">
+                <p className="text-xs text-[#777]">Active bots</p>
+                <strong className="mt-1 block text-lg">{botStatus.total}</strong>
+              </div>
+              <div className="border border-[#eeeeee] bg-[#fafafa] p-3">
+                <p className="text-xs text-[#777]">Bot sold seats</p>
+                <strong className="mt-1 block text-lg text-[var(--danger)]">{botStatus.sold}</strong>
+              </div>
+            </div>
+          )}
 
           <div className="mx-auto mt-8 h-3 max-w-[620px] overflow-hidden rounded-full bg-[#eeeeee]">
             <div className="h-full bg-[var(--melon)] transition-all duration-500" style={{ width: `${progress}%` }} />

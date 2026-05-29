@@ -19,7 +19,7 @@ const agreements = [
 export default function PaymentPage() {
   const { performanceId } = useParams();
   const navigate = useNavigate();
-  const { selectedPerformance, selectedSeat, stats, patchStats, setResult } = useSimulation();
+  const { selectedPerformance, selectedSeat, setSelectedSeat, stats, patchStats, setResult, mode, setMode } = useSimulation();
   const [seconds, setSeconds] = useState(65);
   const [method, setMethod] = useState('money');
   const [installment, setInstallment] = useState('일시불');
@@ -33,8 +33,20 @@ export default function PaymentPage() {
     }
 
     socket.emit('set-phase', { phase: 'payment' });
+    socket.on('multi-ranking', ({ rankings }) => {
+      setMode((prev) => ({ ...prev, rankings }));
+    });
     socket.on('random-event', (payload) => {
       setEvent(payload);
+      if (payload.type === 'session-expired') {
+        if (selectedSeat) socket.emit('release-seat', { seatId: selectedSeat.id });
+        setSelectedSeat(null);
+        patchStats((prev) => ({ errors: prev.errors + 1 }));
+        setTimeout(() => {
+          navigate('/', { replace: true });
+        }, 900);
+        return;
+      }
       if (payload.type === 'installment-delay') {
         setSeconds((prev) => Math.max(1, prev - 7));
         patchStats((prev) => ({ errors: prev.errors + 1 }));
@@ -65,6 +77,7 @@ export default function PaymentPage() {
 
     return () => {
       clearInterval(timer);
+      socket.off('multi-ranking');
       socket.off('random-event');
     };
   }, [selectedSeat, performanceId, navigate, stats]);
@@ -100,8 +113,13 @@ export default function PaymentPage() {
       return;
     }
 
-    socket.emit('complete-payment', { seatId: selectedSeat.id });
-    const nextResult = buildResult({ stats, success: true, failureReason: null });
+    const missionFailed = mode.type === 'mission' && mode.missionZone && selectedSeat.zone !== mode.missionZone;
+    const nextResult = buildResult({
+      stats,
+      success: !missionFailed,
+      failureReason: missionFailed ? `${mode.missionZone}구역 미션을 완료하지 못했습니다.` : null
+    });
+    socket.emit('complete-payment', { seatId: selectedSeat.id, result: nextResult });
     setResult(nextResult);
     navigate('/result');
   };

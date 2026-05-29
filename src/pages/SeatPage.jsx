@@ -5,7 +5,7 @@ import AppShell from '../components/AppShell.jsx';
 import CaptchaBox from '../components/CaptchaBox.jsx';
 import Countdown from '../components/Countdown.jsx';
 import EventModal from '../components/EventModal.jsx';
-import SeatMap from '../components/SeatMap.jsx';
+import SeatMap, { ZoneOverview } from '../components/SeatMap.jsx';
 import { useSimulation } from '../context/SimulationContext.jsx';
 import { socket } from '../socket.js';
 import { createCaptcha } from '../utils/captcha.js';
@@ -13,8 +13,9 @@ import { createCaptcha } from '../utils/captcha.js';
 export default function SeatPage() {
   const { performanceId } = useParams();
   const navigate = useNavigate();
-  const { selectedPerformance, selectedSeat, setSelectedSeat, patchStats, recordClick } = useSimulation();
+  const { selectedPerformance, selectedSeat, setSelectedSeat, patchStats, recordClick, mode } = useSimulation();
   const [seats, setSeats] = useState([]);
+  const [selectedZone, setSelectedZone] = useState(null);
   const [event, setEvent] = useState(null);
   const [seconds, setSeconds] = useState(80);
   const [notice, setNotice] = useState('좌석을 선택해 주세요.');
@@ -22,10 +23,19 @@ export default function SeatPage() {
   const [captchaValue, setCaptchaValue] = useState('');
   const [captchaPassed, setCaptchaPassed] = useState(false);
   const [captchaError, setCaptchaError] = useState('');
+  const [botStatus, setBotStatus] = useState(null);
+  const [botEvent, setBotEvent] = useState(null);
 
   useEffect(() => {
     if (!socket.connected) socket.connect();
-    socket.emit('join-performance', { performanceId, phase: 'seat' });
+    socket.emit('join-performance', {
+      performanceId,
+      phase: 'seat',
+      reactionMs: selectedPerformance?.reactionMs ?? 900,
+      botMode: selectedPerformance?.botMode ?? 'live',
+      missionZone: selectedPerformance?.missionZone ?? mode.missionZone,
+      roomKey: selectedPerformance?.roomKey ?? mode.roomKey
+    });
     socket.emit('set-phase', { phase: 'seat' });
 
     socket.on('seat-map', setSeats);
@@ -43,6 +53,12 @@ export default function SeatPage() {
     });
     socket.on('random-event', (payload) => {
       setEvent(payload);
+      if (payload.type === 'seat-taken') {
+        if (selectedSeat) socket.emit('release-seat', { seatId: selectedSeat.id });
+        setSelectedSeat(null);
+        setNotice('이미 선택된 좌석입니다. 다른 좌석을 다시 선택해 주세요.');
+        patchStats((prev) => ({ seatFailures: prev.seatFailures + 1, errors: prev.errors + 1 }));
+      }
       if (payload.type === 'auto-refresh') {
         if (selectedSeat) socket.emit('release-seat', { seatId: selectedSeat.id });
         setSelectedSeat(null);
@@ -59,6 +75,17 @@ export default function SeatPage() {
         setNotice('좌석 반영이 지연되고 있습니다. 주변 좌석을 같이 확인하세요.');
       }
     });
+    socket.on('bot-status', (payload) => {
+      setBotStatus(payload);
+      patchStats({
+        botSeatsSold: payload.sold ?? 0,
+        botSeatsReleased: payload.released ?? 0
+      });
+    });
+    socket.on('bot-event', (payload) => {
+      setBotEvent(payload);
+      patchStats((prev) => ({ botPressureEvents: (prev.botPressureEvents ?? 0) + 1 }));
+    });
 
     return () => {
       socket.off('seat-map');
@@ -66,6 +93,8 @@ export default function SeatPage() {
       socket.off('seat-claim-failed');
       socket.off('seat-released');
       socket.off('random-event');
+      socket.off('bot-status');
+      socket.off('bot-event');
     };
   }, [performanceId, selectedSeat]);
 
@@ -98,6 +127,11 @@ export default function SeatPage() {
 
   const handleSelectSeat = (seat) => {
     if (!captchaPassed) return;
+    if (mode.type === 'mission' && mode.missionZone && seat.zone !== mode.missionZone) {
+      setNotice(`미션 구역은 ${mode.missionZone}구역입니다. ${seat.zone}구역 좌석은 선택할 수 없습니다.`);
+      patchStats((prev) => ({ errors: prev.errors + 1 }));
+      return;
+    }
     recordClick();
     setNotice(`${seat.id} 좌석 선택 요청 중...`);
     setSelectedSeat(seat);
@@ -166,7 +200,15 @@ export default function SeatPage() {
             <br />
             ※ 이미 선택된 좌석은 회색으로 표시되며, 선택 가능한 좌석은 분홍색으로 표시됩니다.
           </div>
-          <SeatMap seats={seats} selectedSeat={selectedSeat} onSelectSeat={handleSelectSeat} />
+          <SeatMap
+            seats={seats}
+            selectedSeat={selectedSeat}
+            selectedZone={selectedZone}
+            missionZone={mode.missionZone}
+            onSelectZone={setSelectedZone}
+            onBackToZones={() => setSelectedZone(null)}
+            onSelectSeat={handleSelectSeat}
+          />
           <div className="fixed bottom-0 left-0 right-0 h-[54px] bg-[#666] px-9 py-3 text-xl text-white lg:right-[332px]">
             {notice}
           </div>
@@ -174,15 +216,10 @@ export default function SeatPage() {
 
         <aside className="border-l border-[#cccccc] bg-white px-4 py-5">
           <div className="melon-logo mb-5 text-center text-3xl">Melon티켓</div>
-          <div className="mx-auto mb-3 h-[225px] max-w-[260px] bg-[#f3f3f3] p-3">
-            <div className="mb-2 h-5 bg-[#dddddd] text-center text-xs text-[#aaa]">STAGE</div>
-            <div className="grid grid-cols-8 gap-1">
-              {Array.from({ length: 56 }, (_, index) => (
-                <span key={index} className={`h-5 ${index === 42 ? 'bg-[#e76b9a]' : 'bg-[#d5d5d5]'}`} />
-              ))}
-            </div>
+          <div className="mx-auto mb-3 max-w-[260px] bg-[#f3f3f3]">
+            <ZoneOverview seats={seats} selectedZone={selectedZone} missionZone={mode.missionZone} onSelectZone={setSelectedZone} compact />
           </div>
-          <button className="mb-8 ml-auto flex items-center text-sm text-[#777]">
+          <button onClick={() => setSelectedZone(null)} className="mb-8 ml-auto flex items-center text-sm text-[#777]">
             좌석도 전체보기 <ChevronRight size={14} />
           </button>
 
@@ -199,6 +236,18 @@ export default function SeatPage() {
             <p><span className="mr-2 inline-block h-3 w-3 bg-[#7558d9]" />일반석(STANDING) 165,000원</p>
             <p><span className="mr-2 inline-block h-3 w-3 bg-[#e76b9a]" />일반석(SEATED) 165,000원</p>
           </div>
+
+          {botStatus && (
+            <div className="mt-5 border border-[#dddddd] bg-[#fafafa] p-4 text-sm leading-7 text-[#555]">
+              <div className="mb-2 flex items-center justify-between">
+                <strong className="text-[#111]">AI 경쟁 현황</strong>
+                <span className="rounded-full bg-white px-2 py-1 text-xs uppercase text-[var(--melon)]">{botStatus.mode}</span>
+              </div>
+              <p>활성 봇 {botStatus.total}명 · 임시 점유 {botStatus.held}석</p>
+              <p>봇 결제 완료 {botStatus.sold}석 · 반환 {botStatus.released}석</p>
+              {botEvent && <p className="mt-2 border-t border-[#e5e5e5] pt-2 text-xs text-[#777]">{botEvent.message}</p>}
+            </div>
+          )}
 
           <div className="mt-6">
             <Countdown seconds={seconds} label="좌석 선택 제한 시간" />
